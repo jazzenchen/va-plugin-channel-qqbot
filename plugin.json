@@ -1,0 +1,26 @@
+{
+  "id": "qqbot",
+  "name": "QQ Bot Channel",
+  "version": "0.1.0",
+  "kind": "channel",
+  "runtime": "node",
+  "entry": "dist/main.js",
+  "build": "npm install && npm run build",
+  "minHostVersion": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "app_id": { "type": "string", "description": "QQ Bot App ID from QQ Open Platform" },
+      "token": { "type": "string", "description": "QQ Bot Token" },
+      "secret": { "type": "string", "description": "QQ Bot Secret (optional)" }
+    },
+    "required": ["app_id", "token"]
+  },
+  "capabilities": {
+    "streaming": false,
+    "interactiveCards": false,
+    "reactions": false,
+    "editMessage": false,
+    "media": true
+  }
+}
