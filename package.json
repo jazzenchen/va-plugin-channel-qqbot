@@ -1,21 +1,25 @@
 {
   "name": "@vibearound/plugin-qqbot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "VibeAround QQ Bot (QQ频道) channel plugin (stdio JSON-RPC)",
+  "description": "VibeAround QQ Bot (v2) channel plugin (stdio JSON-RPC)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "postinstall": "echo 'Note: openclaw peer dependency warning is expected and safe to ignore.'"
   },
   "dependencies": {
+    "@tencent-connect/openclaw-qqbot": "^1.7.1",
     "@vibearound/plugin-channel-sdk": "^0.1.2",
-    "qq-guild-bot": "^2.9.4"
+    "ws": "^8.18.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
     "typescript": "^5.7.0"
   },
   "engines": {

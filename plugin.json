@@ -1,26 +1,31 @@
 {
   "id": "qqbot",
   "name": "QQ Bot Channel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "channel",
   "runtime": "node",
   "entry": "dist/main.js",
-  "build": "npm install && npm run build",
+  "build": "npm install --legacy-peer-deps && npm run build",
   "minHostVersion": "0.1.0",
   "configSchema": {
     "type": "object",
     "properties": {
-      "app_id": { "type": "string", "description": "QQ Bot App ID from QQ Open Platform" },
-      "token": { "type": "string", "description": "QQ Bot Token" },
-      "secret": { "type": "string", "description": "QQ Bot Secret (optional)" }
+      "app_id": {
+        "type": "string",
+        "description": "QQ Bot AppID (机器人 ID, numeric) from QQ Open Platform → 开发设置"
+      },
+      "secret": {
+        "type": "string",
+        "description": "QQ Bot AppSecret (密钥) from QQ Open Platform → 开发设置. Accepts either the raw secret or the combined 'appid:secret' format."
+      }
     },
-    "required": ["app_id", "token"]
+    "required": ["app_id", "secret"]
   },
   "capabilities": {
     "streaming": false,
-    "interactiveCards": false,
+    "interactiveCards": true,
     "reactions": false,
     "editMessage": false,
-    "media": true
+    "media": false
   }
 }

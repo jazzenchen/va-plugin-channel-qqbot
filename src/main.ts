@@ -8,6 +8,9 @@
  * QQ Guild Bot uses WebSocket gateway — no public IP required.
  */
 
+// MUST be the first import — guards stdout from qq-guild-bot SDK loglevel output
+import "./stdout-guard.js";
+
 import os from "node:os";
 import path from "node:path";
 import {
@@ -76,20 +79,20 @@ async function start(): Promise<void> {
 
   const config = meta.config;
   const appId = config.app_id as string;
-  const token = config.token as string;
+  const secret = config.secret as string;
   const cacheDir = meta.cacheDir ?? path.join(os.homedir(), ".vibearound", ".cache");
 
   if (!appId) {
     throw new Error("app_id is required in QQ Bot config");
   }
-  if (!token) {
-    throw new Error("token is required in QQ Bot config");
+  if (!secret) {
+    throw new Error("secret is required in QQ Bot config");
   }
 
   log("info", `initialized, host=${agentInfo.name ?? "unknown"} cacheDir=${cacheDir}`);
 
-  // Create QQ bot
-  const qqBot = new QQBot({ app_id: appId, token }, agent, log, cacheDir);
+  // Create QQ bot (v2 platform)
+  const qqBot = new QQBot({ app_id: appId, secret }, agent, log, cacheDir);
 
   // Parse verbose config
   const verbose = (config as unknown as Record<string, unknown>).verbose as
