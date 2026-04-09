@@ -19,6 +19,8 @@
  *   7. Handle dispatch events (op=0): C2C_MESSAGE_CREATE, GROUP_AT_MESSAGE_CREATE, etc.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
   getAccessToken,
   getGatewayUrl,
@@ -31,6 +33,12 @@ import {
 import WebSocket from "ws";
 import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
+
+interface DownloadedAttachment {
+  readonly path: string;
+  readonly mimeType: string;
+  readonly fileName: string;
+}
 
 export interface QQBotConfig {
   app_id: string;
@@ -71,6 +79,16 @@ interface DispatchAuthor {
   member_openid?: string;
 }
 
+interface DispatchAttachment {
+  /** e.g. "image/jpeg", "voice/silk", "application/octet-stream" */
+  content_type?: string;
+  /** Short-lived signed URL from QQ CDN — no auth needed to fetch. */
+  url?: string;
+  filename?: string;
+  /** Voice ASR transcript (QQ-provided). */
+  asr_refer_text?: string;
+}
+
 interface DispatchEvent {
   id: string;
   content?: string;
@@ -78,6 +96,8 @@ interface DispatchEvent {
   channel_id?: string;
   guild_id?: string;
   group_openid?: string;
+  /** Rich-media attachments (images, voice, files). Missing when text-only. */
+  attachments?: DispatchAttachment[];
 }
 
 export class QQBot {
@@ -316,54 +336,112 @@ export class QQBot {
 
   private async handleC2CMessage(event: DispatchEvent): Promise<void> {
     const text = this.stripMention(event.content ?? "");
-    if (!text) return;
     const senderOpenid = event.author?.user_openid;
     if (!senderOpenid) return;
+    if (!text && !event.attachments?.length) return;
 
     const channelId = `qqbot:c2c:${senderOpenid}`;
     this.pending.set(channelId, { msgId: event.id, target: senderOpenid, kind: "c2c" });
-    this.log("debug", `c2c chat=${channelId} text=${text.slice(0, 80)}`);
-    await this.dispatchPrompt(channelId, text);
+    this.log(
+      "debug",
+      `c2c chat=${channelId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
+    );
+    await this.dispatchPrompt(channelId, text, event.attachments);
   }
 
   private async handleGroupAtMessage(event: DispatchEvent): Promise<void> {
     const text = this.stripMention(event.content ?? "");
-    if (!text) return;
     const groupOpenid = event.group_openid;
     if (!groupOpenid) return;
+    if (!text && !event.attachments?.length) return;
 
     const channelId = `qqbot:group:${groupOpenid}`;
     this.pending.set(channelId, { msgId: event.id, target: groupOpenid, kind: "group" });
-    this.log("debug", `group chat=${channelId} text=${text.slice(0, 80)}`);
-    await this.dispatchPrompt(channelId, text);
+    this.log(
+      "debug",
+      `group chat=${channelId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
+    );
+    await this.dispatchPrompt(channelId, text, event.attachments);
   }
 
   private async handleAtMessage(event: DispatchEvent): Promise<void> {
     const text = this.stripMention(event.content ?? "");
-    if (!text) return;
     const channelId = event.channel_id;
     if (!channelId) return;
+    if (!text && !event.attachments?.length) return;
 
     const ourId = `qqbot:channel:${channelId}`;
     this.pending.set(ourId, { msgId: event.id, target: channelId, kind: "channel" });
-    this.log("debug", `channel chat=${ourId} text=${text.slice(0, 80)}`);
-    await this.dispatchPrompt(ourId, text);
+    this.log(
+      "debug",
+      `channel chat=${ourId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
+    );
+    await this.dispatchPrompt(ourId, text, event.attachments);
   }
 
   private async handleDmMessage(event: DispatchEvent): Promise<void> {
     const text = this.stripMention(event.content ?? "");
-    if (!text) return;
     const guildId = event.guild_id;
     if (!guildId) return;
+    if (!text && !event.attachments?.length) return;
 
     const channelId = `qqbot:dm:${guildId}`;
     this.pending.set(channelId, { msgId: event.id, target: guildId, kind: "dm" });
-    this.log("debug", `dm chat=${channelId} text=${text.slice(0, 80)}`);
-    await this.dispatchPrompt(channelId, text);
+    this.log(
+      "debug",
+      `dm chat=${channelId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
+    );
+    await this.dispatchPrompt(channelId, text, event.attachments);
   }
 
-  private async dispatchPrompt(channelId: string, text: string): Promise<void> {
-    const contentBlocks: ContentBlock[] = [{ type: "text", text }];
+  private async dispatchPrompt(
+    channelId: string,
+    text: string,
+    attachments?: DispatchAttachment[],
+  ): Promise<void> {
+    const contentBlocks: ContentBlock[] = [];
+
+    if (text) {
+      contentBlocks.push({ type: "text", text });
+    }
+
+    // Download QQ attachments into the plugin cache so ACPPod can relocate
+    // them into the workspace cache. QQ CDN URLs are short-lived signed
+    // URLs and work without auth — we just need to fetch them.
+    const downloaded: DownloadedAttachment[] = [];
+    for (const attachment of attachments ?? []) {
+      if (!attachment.url) continue;
+      const local = await this.downloadAttachment(channelId, attachment).catch(
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.log(
+            "warn",
+            `failed to download qqbot attachment ${attachment.url}: ${msg}`,
+          );
+          return null;
+        },
+      );
+      if (local) downloaded.push(local);
+    }
+
+    if (!text && downloaded.length > 0) {
+      contentBlocks.push({
+        type: "text",
+        text: `The user sent ${downloaded.length} file${downloaded.length > 1 ? "s" : ""}.`,
+      });
+    }
+
+    for (const file of downloaded) {
+      contentBlocks.push({
+        type: "resource_link",
+        uri: `file://${file.path}`,
+        name: file.fileName,
+        mimeType: file.mimeType,
+      });
+    }
+
+    if (contentBlocks.length === 0) return;
+
     this.streamHandler?.onPromptSent(channelId);
 
     try {
@@ -384,4 +462,77 @@ export class QQBot {
       this.streamHandler?.onTurnError(channelId, errMsg);
     }
   }
+
+  /**
+   * Download a QQ attachment into the plugin cache. Files are keyed by
+   * channelId + the last segment of the URL path so repeated references
+   * to the same file don't re-download.
+   */
+  private async downloadAttachment(
+    channelId: string,
+    attachment: DispatchAttachment,
+  ): Promise<DownloadedAttachment> {
+    const url = attachment.url!;
+    const contentType = attachment.content_type ?? "application/octet-stream";
+
+    const safeChannel = channelId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const dir = path.join(this.cacheDir, "qqbot", safeChannel);
+
+    // Build a stable filename: prefer the supplied filename, else derive
+    // from the URL path. Strip query strings which contain signatures.
+    const urlPath = (() => {
+      try {
+        return new URL(url).pathname;
+      } catch {
+        return url;
+      }
+    })();
+    const baseFromUrl = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const supplied = (attachment.filename ?? "").replace(/[^a-zA-Z0-9._-]/g, "_");
+    const baseName = supplied || baseFromUrl || `${Date.now()}`;
+    const extHint = path.extname(baseName) || extFromMime(contentType);
+    const fileName = baseName.includes(".")
+      ? baseName
+      : `${baseName}${extHint}`;
+    const localPath = path.join(dir, fileName);
+
+    try {
+      await fs.access(localPath);
+      this.log("debug", `qqbot attachment cache hit: ${localPath}`);
+      return { path: localPath, mimeType: contentType, fileName };
+    } catch {
+      // not cached
+    }
+
+    this.log(
+      "debug",
+      `downloading qqbot attachment chat=${channelId} url=${url}`,
+    );
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} fetching attachment`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(localPath, buf);
+    this.log(
+      "debug",
+      `cached qqbot attachment ${buf.length} bytes → ${localPath}`,
+    );
+
+    return { path: localPath, mimeType: contentType, fileName };
+  }
+}
+
+function extFromMime(mime: string): string {
+  const lower = mime.toLowerCase();
+  if (lower.includes("png")) return ".png";
+  if (lower.includes("jpeg") || lower.includes("jpg")) return ".jpg";
+  if (lower.includes("gif")) return ".gif";
+  if (lower.includes("webp")) return ".webp";
+  if (lower.includes("silk")) return ".silk";
+  if (lower.includes("wav")) return ".wav";
+  if (lower.includes("mp3")) return ".mp3";
+  if (lower.includes("mp4")) return ".mp4";
+  return "";
 }

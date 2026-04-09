@@ -52,16 +52,11 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     return null;
   }
 
-  /** No-op: QQ Bot does not support editing messages. */
-  protected async editBlock(
-    _channelId: string,
-    _ref: string,
-    _kind: BlockKind,
-    _content: string,
-    _sealed: boolean,
-  ): Promise<void> {
-    // not supported
-  }
+  // Intentionally do NOT override `editBlock`: QQ has no edit primitive, and
+  // leaving it undefined lets BlockRenderer.flush() detect send-only mode
+  // and defer intermediate debounced flushes until onTurnEnd seals the
+  // block. Otherwise the user would see the partial first-flush send AND
+  // the final sealed send as two separate messages.
 
   protected async onAfterTurnEnd(channelId: string): Promise<void> {
     this.log("debug", `turn_complete session=${channelId}`);
