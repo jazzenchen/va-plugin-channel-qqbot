@@ -29,4 +29,6 @@ runChannelPlugin({
     ),
   createRenderer: (bot, log, verbose) =>
     new AgentStreamHandler(bot, log, verbose),
+  // Heartbeat health check — gateway websocket must be OPEN.
+  healthCheck: async (bot) => bot.isConnected(),
 });

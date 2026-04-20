@@ -110,6 +110,11 @@ export class QQBot {
 
   private accessToken: string | null = null;
   private ws: WebSocket | null = null;
+
+  /** Heartbeat check — gateway ws must be open for inbound events to arrive. */
+  public isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastSeq: number | null = null;
   private sessionId: string | null = null;
