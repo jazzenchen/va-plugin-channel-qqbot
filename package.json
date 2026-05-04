@@ -1,5 +1,5 @@
 {
-  "name": "@vibearound/plugin-qqbot",
+  "name": "@vibearound/plugin-channel-qqbot",
   "version": "0.5.0",
   "private": true,
   "type": "module",
