@@ -31,6 +31,7 @@ import {
   setApiLogger,
 } from "@tencent-connect/openclaw-qqbot/dist/src/api.js";
 import WebSocket from "ws";
+import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
 import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
@@ -456,12 +457,7 @@ export class QQBot {
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
-      const errMsg =
-        error instanceof Error
-          ? error.message
-          : typeof error === "object" && error !== null && "message" in error
-            ? String((error as { message: unknown }).message)
-            : String(error);
+      const errMsg = extractErrorMessage(error);
       this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
       this.streamHandler?.onTurnError(chatId, errMsg);
     }
