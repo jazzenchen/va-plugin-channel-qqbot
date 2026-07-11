@@ -31,8 +31,13 @@ import {
   setApiLogger,
 } from "@tencent-connect/openclaw-qqbot/dist/src/api.js";
 import WebSocket from "ws";
-import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedAttachment {
@@ -107,6 +112,8 @@ export class QQBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
 
   private accessToken: string | null = null;
@@ -125,10 +132,19 @@ export class QQBot {
   /** chatId → context for the most recent inbound message. */
   private pending = new Map<string, PendingContext>();
 
-  constructor(config: QQBotConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: QQBotConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
     this.appId = config.app_id;
 
     // Accept either raw secret or "appid:secret" combined format
@@ -352,7 +368,15 @@ export class QQBot {
       "debug",
       `c2c chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.user_openid ?? event.author?.id,
+      platformMessageId: event.id,
+      scope: "dm",
+      addressedBy: "dm",
+    }, text, event.attachments);
   }
 
   private async handleGroupAtMessage(event: DispatchEvent): Promise<void> {
@@ -367,7 +391,15 @@ export class QQBot {
       "debug",
       `group chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.member_openid ?? event.author?.id,
+      platformMessageId: event.id,
+      scope: "group",
+      addressedBy: "mention",
+    }, text, event.attachments);
   }
 
   private async handleAtMessage(event: DispatchEvent): Promise<void> {
@@ -382,7 +414,15 @@ export class QQBot {
       "debug",
       `channel chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.id,
+      platformMessageId: event.id,
+      scope: "group",
+      addressedBy: "mention",
+    }, text, event.attachments);
   }
 
   private async handleDmMessage(event: DispatchEvent): Promise<void> {
@@ -397,14 +437,28 @@ export class QQBot {
       "debug",
       `dm chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.id,
+      platformMessageId: event.id,
+      scope: "dm",
+      addressedBy: "dm",
+    }, text, event.attachments);
   }
 
   private async dispatchPrompt(
-    chatId: string,
+    inboundContext: ChannelInboundContext,
     text: string,
     attachments?: DispatchAttachment[],
   ): Promise<void> {
+    const { chatId } = inboundContext;
+    if (text && isChannelStopCommand(text)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      return;
+    }
+
     const contentBlocks: ContentBlock[] = [];
 
     if (text) {
@@ -450,10 +504,11 @@ export class QQBot {
     this.streamHandler?.onPromptSent(chatId);
 
     try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
+      const response = await sendChannelPrompt(this.agent, {
+        context: inboundContext,
         prompt: contentBlocks,
       });
+      if (!response) return;
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
