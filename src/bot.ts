@@ -33,11 +33,12 @@ import {
 import WebSocket from "ws";
 import {
   cancelChannelPrompt,
+  channelTargetFromInboundContext,
   extractErrorMessage,
   isChannelStopCommand,
   sendChannelPrompt,
 } from "@vibearound/plugin-channel-sdk";
-import type { Agent, ChannelInboundContext, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedAttachment {
@@ -176,10 +177,10 @@ export class QQBot {
     return this.accessToken;
   }
 
-  async sendText(chatId: string, content: string): Promise<void> {
-    const ctx = this.pending.get(chatId);
+  async sendText(target: ChannelTarget, content: string): Promise<void> {
+    const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", `no pending context for chat=${chatId}, dropping reply`);
+      this.log("warn", `no pending context for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
@@ -363,7 +364,7 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `c2c:${senderOpenid}`;
-    this.pending.set(chatId, { msgId: event.id, target: senderOpenid, kind: "c2c" });
+    this.pending.set(event.id, { msgId: event.id, target: senderOpenid, kind: "c2c" });
     this.log(
       "debug",
       `c2c chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
@@ -386,7 +387,7 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `group:${groupOpenid}`;
-    this.pending.set(chatId, { msgId: event.id, target: groupOpenid, kind: "group" });
+    this.pending.set(event.id, { msgId: event.id, target: groupOpenid, kind: "group" });
     this.log(
       "debug",
       `group chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
@@ -409,7 +410,7 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `channel:${channelId}`;
-    this.pending.set(chatId, { msgId: event.id, target: channelId, kind: "channel" });
+    this.pending.set(event.id, { msgId: event.id, target: channelId, kind: "channel" });
     this.log(
       "debug",
       `channel chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
@@ -432,7 +433,7 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `dm:${guildId}`;
-    this.pending.set(chatId, { msgId: event.id, target: guildId, kind: "dm" });
+    this.pending.set(event.id, { msgId: event.id, target: guildId, kind: "dm" });
     this.log(
       "debug",
       `dm chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
@@ -454,8 +455,10 @@ export class QQBot {
     attachments?: DispatchAttachment[],
   ): Promise<void> {
     const { chatId } = inboundContext;
+    const target = channelTargetFromInboundContext(inboundContext);
     if (text && isChannelStopCommand(text)) {
       await cancelChannelPrompt(this.agent, { context: inboundContext });
+      if (target.replyTo) this.pending.delete(target.replyTo);
       return;
     }
 
@@ -494,27 +497,36 @@ export class QQBot {
       });
     }
 
-    if (contentBlocks.length === 0) return;
-
-    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
+    if (contentBlocks.length === 0) {
+      if (target.replyTo) this.pending.delete(target.replyTo);
       return;
     }
 
-    this.streamHandler?.onPromptSent(chatId);
+    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+    if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+      if (target.replyTo) this.pending.delete(target.replyTo);
+      return;
+    }
+
+    this.streamHandler?.onPromptSent(target);
 
     try {
       const response = await sendChannelPrompt(this.agent, {
         context: inboundContext,
         prompt: contentBlocks,
       });
-      if (!response) return;
+      if (!response) {
+        await this.streamHandler?.onTurnEnd(target);
+        return;
+      }
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(chatId);
+      await this.streamHandler?.onTurnEnd(target);
     } catch (error: unknown) {
       const errMsg = extractErrorMessage(error);
       this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      this.streamHandler?.onTurnError(chatId, errMsg);
+      await this.streamHandler?.onTurnError(target, errMsg);
+    } finally {
+      if (target.replyTo) this.pending.delete(target.replyTo);
     }
   }
 

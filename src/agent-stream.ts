@@ -5,6 +5,7 @@
 import {
   BlockRenderer,
   type BlockKind,
+  type ChannelTarget,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { QQBot } from "./bot.js";
@@ -25,8 +26,8 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.log = log;
   }
 
-  protected async sendText(chatId: string, text: string): Promise<void> {
-    await this.qqBot.sendText(chatId, text);
+  protected async sendText(target: ChannelTarget, text: string): Promise<void> {
+    await this.qqBot.sendText(target, text);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
@@ -37,8 +38,8 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  protected async sendBlock(chatId: string, _kind: BlockKind, content: string): Promise<string | null> {
-    await this.qqBot.sendText(chatId, content);
+  protected async sendBlock(target: ChannelTarget, _kind: BlockKind, content: string): Promise<string | null> {
+    await this.qqBot.sendText(target, content);
     return null;
   }
 }
