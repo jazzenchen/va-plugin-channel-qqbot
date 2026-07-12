@@ -20,12 +20,14 @@ runChannelPlugin({
   name: "vibearound-qqbot",
   version: "0.1.0",
   requiredConfig: ["app_id", "secret"],
-  createBot: ({ config, agent, log, cacheDir }) =>
+  createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new QQBot(
       { app_id: config.app_id as string, secret: config.secret as string },
       agent,
       log,
       cacheDir,
+      channelInstanceId,
+      actorId,
     ),
   createRenderer: (bot, log, verbose) =>
     new AgentStreamHandler(bot, log, verbose),
