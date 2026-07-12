@@ -12,7 +12,7 @@
     "postinstall": "echo 'Note: openclaw peer dependency warning is expected and safe to ignore.'"
   },
   "dependencies": {
-    "@tencent-connect/openclaw-qqbot": "^1.7.1",
+    "@tencent-connect/openclaw-qqbot": "^1.7.2",
     "@vibearound/plugin-channel-sdk": "file:../va-plugin-channel-sdk",
     "ws": "^8.21.0",
     "zod": "^4.3.6"
