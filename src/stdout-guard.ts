@@ -2,11 +2,14 @@
  * stdout-guard.ts — MUST be the first import in main.ts.
  *
  * Intercepts process.stdout.write so that only JSON lines (starting with '{')
- * pass through. Everything else is redirected to stderr.
+ * pass through. Everything else is discarded because upstream diagnostics can
+ * contain credentials, signed URLs, request bodies, and user content.
  *
- * This prevents the qq-guild-bot SDK's loglevel/console.log output from
- * polluting the ACP JSON-RPC channel, which would otherwise crash the plugin.
+ * This prevents SDK console output from polluting the ACP JSON-RPC channel or
+ * being persisted by the host's stderr capture.
  */
+
+import { isProtocolStdoutLine } from "./log-policy.js";
 
 const _origWrite = process.stdout.write.bind(process.stdout);
 
@@ -25,11 +28,9 @@ const guarded: StdoutWrite = function (chunk, ..._args) {
   for (const line of str.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    if (trimmed.startsWith("{")) {
+    if (isProtocolStdoutLine(trimmed)) {
       // JSON line — pass through
       _origWrite(line + "\n");
-    } else {
-      process.stderr.write("[stdout-guard] " + line + "\n");
     }
   }
   return true;
