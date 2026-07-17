@@ -31,8 +31,16 @@ import {
   setApiLogger,
 } from "@tencent-connect/openclaw-qqbot/dist/src/api.js";
 import WebSocket from "ws";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  channelTargetFromInboundContext,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
+import { readBoundedResponse } from "./bounded-response.js";
 
 interface DownloadedAttachment {
   readonly path: string;
@@ -106,11 +114,19 @@ export class QQBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
 
   private accessToken: string | null = null;
   private ws: WebSocket | null = null;
+
+  /** Heartbeat check — gateway ws must be open for inbound events to arrive. */
+  public isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private awaitingHeartbeatAck = false;
   private lastSeq: number | null = null;
   private sessionId: string | null = null;
   private reconnectAttempts = 0;
@@ -119,10 +135,19 @@ export class QQBot {
   /** chatId → context for the most recent inbound message. */
   private pending = new Map<string, PendingContext>();
 
-  constructor(config: QQBotConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: QQBotConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
     this.appId = config.app_id;
 
     // Accept either raw secret or "appid:secret" combined format
@@ -147,17 +172,16 @@ export class QQBot {
     this.streamHandler = handler;
   }
 
-  /** Get a fresh access token (cached internally by the API helper). */
+  /** Get a fresh access token. The API helper owns expiry-aware caching. */
   private async ensureToken(): Promise<string> {
-    if (this.accessToken) return this.accessToken;
     this.accessToken = await getAccessToken(this.appId, this.clientSecret);
     return this.accessToken;
   }
 
-  async sendText(chatId: string, content: string): Promise<void> {
-    const ctx = this.pending.get(chatId);
+  async sendText(target: ChannelTarget, content: string): Promise<void> {
+    const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", `no pending context for chat=${chatId}, dropping reply`);
+      this.log("warn", `no pending context for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
@@ -203,7 +227,7 @@ export class QQBot {
     try {
       const token = await this.ensureToken();
       const gatewayUrl = await getGatewayUrl(token);
-      this.log("info", `QQ Bot connecting to ${gatewayUrl}`);
+      this.log("info", "QQ Bot connecting to gateway");
 
       const ws = new WebSocket(gatewayUrl);
       this.ws = ws;
@@ -226,6 +250,7 @@ export class QQBot {
           clearInterval(this.heartbeatTimer);
           this.heartbeatTimer = null;
         }
+        this.awaitingHeartbeatAck = false;
         if (!this.stopped) {
           this.scheduleReconnect();
         }
@@ -283,9 +308,16 @@ export class QQBot {
 
         // Start heartbeat
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.awaitingHeartbeatAck = false;
         this.heartbeatTimer = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
+            if (this.awaitingHeartbeatAck) {
+              this.log("warn", "QQ Bot heartbeat ACK timed out; reconnecting");
+              this.ws.terminate();
+              return;
+            }
             this.ws.send(JSON.stringify({ op: 1, d: this.lastSeq }));
+            this.awaitingHeartbeatAck = true;
           }
         }, interval);
         break;
@@ -323,6 +355,7 @@ export class QQBot {
       }
 
       case 11: // Heartbeat ACK
+        this.awaitingHeartbeatAck = false;
         break;
 
       default:
@@ -341,12 +374,20 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `c2c:${senderOpenid}`;
-    this.pending.set(chatId, { msgId: event.id, target: senderOpenid, kind: "c2c" });
+    this.pending.set(event.id, { msgId: event.id, target: senderOpenid, kind: "c2c" });
     this.log(
       "debug",
       `c2c chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.user_openid ?? event.author?.id,
+      platformMessageId: event.id,
+      scope: "dm",
+      addressedBy: "dm",
+    }, text, event.attachments);
   }
 
   private async handleGroupAtMessage(event: DispatchEvent): Promise<void> {
@@ -356,12 +397,20 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `group:${groupOpenid}`;
-    this.pending.set(chatId, { msgId: event.id, target: groupOpenid, kind: "group" });
+    this.pending.set(event.id, { msgId: event.id, target: groupOpenid, kind: "group" });
     this.log(
       "debug",
       `group chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.member_openid ?? event.author?.id,
+      platformMessageId: event.id,
+      scope: "group",
+      addressedBy: "mention",
+    }, text, event.attachments);
   }
 
   private async handleAtMessage(event: DispatchEvent): Promise<void> {
@@ -371,12 +420,20 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `channel:${channelId}`;
-    this.pending.set(chatId, { msgId: event.id, target: channelId, kind: "channel" });
+    this.pending.set(event.id, { msgId: event.id, target: channelId, kind: "channel" });
     this.log(
       "debug",
       `channel chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.id,
+      platformMessageId: event.id,
+      scope: "group",
+      addressedBy: "mention",
+    }, text, event.attachments);
   }
 
   private async handleDmMessage(event: DispatchEvent): Promise<void> {
@@ -386,19 +443,35 @@ export class QQBot {
     if (!text && !event.attachments?.length) return;
 
     const chatId = `dm:${guildId}`;
-    this.pending.set(chatId, { msgId: event.id, target: guildId, kind: "dm" });
+    this.pending.set(event.id, { msgId: event.id, target: guildId, kind: "dm" });
     this.log(
       "debug",
       `dm chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
     );
-    await this.dispatchPrompt(chatId, text, event.attachments);
+    await this.dispatchPrompt({
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId: event.author?.id,
+      platformMessageId: event.id,
+      scope: "dm",
+      addressedBy: "dm",
+    }, text, event.attachments);
   }
 
   private async dispatchPrompt(
-    chatId: string,
+    inboundContext: ChannelInboundContext,
     text: string,
     attachments?: DispatchAttachment[],
   ): Promise<void> {
+    const { chatId } = inboundContext;
+    const target = channelTargetFromInboundContext(inboundContext);
+    if (text && isChannelStopCommand(text)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      if (target.replyTo) this.pending.delete(target.replyTo);
+      return;
+    }
+
     const contentBlocks: ContentBlock[] = [];
 
     if (text) {
@@ -406,12 +479,17 @@ export class QQBot {
     }
 
     const downloaded: DownloadedAttachment[] = [];
-    for (const attachment of attachments ?? []) {
+    for (const [index, attachment] of (attachments ?? []).entries()) {
       if (!attachment.url) continue;
-      const local = await this.downloadAttachment(chatId, attachment).catch(
+      const local = await this.downloadAttachment(
+        chatId,
+        inboundContext.platformMessageId ?? "unknown",
+        index,
+        attachment,
+      ).catch(
         (err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          this.log("warn", `failed to download attachment ${attachment.url}: ${msg}`);
+          this.log("warn", `failed to download attachment ${attachment.filename ?? index}: ${msg}`);
           return null;
         },
       );
@@ -434,41 +512,48 @@ export class QQBot {
       });
     }
 
-    if (contentBlocks.length === 0) return;
-
-    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
+    if (contentBlocks.length === 0) {
+      if (target.replyTo) this.pending.delete(target.replyTo);
       return;
     }
 
-    this.streamHandler?.onPromptSent(chatId);
+    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+    if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+      if (target.replyTo) this.pending.delete(target.replyTo);
+      return;
+    }
+
+    this.streamHandler?.onPromptSent(target);
 
     try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
+      const response = await sendChannelPrompt(this.agent, {
+        context: inboundContext,
         prompt: contentBlocks,
       });
+      if (!response) {
+        await this.streamHandler?.onTurnEnd(target);
+        return;
+      }
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(chatId);
+      await this.streamHandler?.onTurnEnd(target);
     } catch (error: unknown) {
-      const errMsg =
-        error instanceof Error
-          ? error.message
-          : typeof error === "object" && error !== null && "message" in error
-            ? String((error as { message: unknown }).message)
-            : String(error);
+      const errMsg = extractErrorMessage(error);
       this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      this.streamHandler?.onTurnError(chatId, errMsg);
+      await this.streamHandler?.onTurnError(target, errMsg);
+    } finally {
+      if (target.replyTo) this.pending.delete(target.replyTo);
     }
   }
 
   /**
    * Download a QQ attachment into the plugin cache. Files are keyed by
-   * chatId + the last segment of the URL path so repeated references
-   * to the same file don't re-download.
+   * message id and attachment index, so same-name files in later messages
+   * cannot reuse stale bytes.
    */
   private async downloadAttachment(
     chatId: string,
+    messageId: string,
+    index: number,
     attachment: DispatchAttachment,
   ): Promise<DownloadedAttachment> {
     const url = attachment.url!;
@@ -488,11 +573,9 @@ export class QQBot {
     })();
     const baseFromUrl = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
     const supplied = (attachment.filename ?? "").replace(/[^a-zA-Z0-9._-]/g, "_");
-    const baseName = supplied || baseFromUrl || `${Date.now()}`;
-    const extHint = path.extname(baseName) || extFromMime(contentType);
-    const fileName = baseName.includes(".")
-      ? baseName
-      : `${baseName}${extHint}`;
+    const displayName = supplied || baseFromUrl || "attachment";
+    const safeMessageId = messageId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const fileName = buildAttachmentCacheFileName(safeMessageId, index, displayName, contentType);
     const localPath = path.join(dir, fileName);
 
     try {
@@ -505,13 +588,13 @@ export class QQBot {
 
     this.log(
       "debug",
-      `downloading qqbot attachment chat=${chatId} url=${url}`,
+      `downloading qqbot attachment chat=${chatId} name=${displayName}`,
     );
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} fetching attachment`);
     }
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = await readBoundedResponse(res);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(localPath, buf);
     this.log(
@@ -521,6 +604,17 @@ export class QQBot {
 
     return { path: localPath, mimeType: contentType, fileName };
   }
+}
+
+export function buildAttachmentCacheFileName(
+  messageId: string,
+  index: number,
+  displayName: string,
+  contentType: string,
+): string {
+  const baseName = `${messageId}-${index}-${displayName}`;
+  const extHint = path.extname(displayName) || extFromMime(contentType);
+  return path.extname(baseName) ? baseName : `${baseName}${extHint}`;
 }
 
 function extFromMime(mime: string): string {
