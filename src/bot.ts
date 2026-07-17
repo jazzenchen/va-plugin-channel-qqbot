@@ -41,6 +41,7 @@ import {
 import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 import { readBoundedResponse } from "./bounded-response.js";
+import { safeErrorCategory, SILENT_UPSTREAM_LOGGER } from "./log-policy.js";
 
 interface DownloadedAttachment {
   readonly path: string;
@@ -159,13 +160,7 @@ export class QQBot {
       this.clientSecret = rawSecret;
     }
 
-    // Pipe Tencent's api logger into our log function
-    setApiLogger({
-      info: (msg: string) => log("info", `[qqbot-api] ${msg}`),
-      error: (msg: string) => log("error", `[qqbot-api] ${msg}`),
-      warn: (msg: string) => log("warn", `[qqbot-api] ${msg}`),
-      debug: (msg: string) => log("debug", `[qqbot-api] ${msg}`),
-    });
+    setApiLogger(SILENT_UPSTREAM_LOGGER);
   }
 
   setStreamHandler(handler: AgentStreamHandler): void {
@@ -181,7 +176,7 @@ export class QQBot {
   async sendText(target: ChannelTarget, content: string): Promise<void> {
     const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", `no pending context for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
+      this.log("warn", "reply dropped because its pending context expired");
       return;
     }
     try {
@@ -200,9 +195,8 @@ export class QQBot {
           await sendDmMessage(token, ctx.target, content, ctx.msgId);
           break;
       }
-    } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `sendText failed: ${err.message ?? String(e)}`);
+    } catch (error: unknown) {
+      this.log("error", `sendText failed category=${safeErrorCategory(error)}`);
     }
   }
 
@@ -239,13 +233,13 @@ export class QQBot {
       ws.on("message", (data) => {
         try {
           this.handleFrame(JSON.parse(data.toString()));
-        } catch (e) {
-          this.log("error", `failed to parse frame: ${e}`);
+        } catch {
+          this.log("error", "failed to parse gateway frame");
         }
       });
 
-      ws.on("close", (code, reason) => {
-        this.log("warn", `QQ Bot WebSocket closed: code=${code} reason=${reason.toString()}`);
+      ws.on("close", (code) => {
+        this.log("warn", `QQ Bot WebSocket closed: code=${code}`);
         if (this.heartbeatTimer) {
           clearInterval(this.heartbeatTimer);
           this.heartbeatTimer = null;
@@ -256,12 +250,11 @@ export class QQBot {
         }
       });
 
-      ws.on("error", (err) => {
-        this.log("error", `QQ Bot WebSocket error: ${err.message}`);
+      ws.on("error", (error) => {
+        this.log("error", `QQ Bot WebSocket error category=${safeErrorCategory(error)}`);
       });
-    } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `QQ Bot connect failed: ${err.message ?? String(e)}`);
+    } catch (error: unknown) {
+      this.log("error", `QQ Bot connect failed category=${safeErrorCategory(error)}`);
       if (!this.stopped) {
         this.scheduleReconnect();
       }
@@ -327,13 +320,10 @@ export class QQBot {
         // DISPATCH
         switch (t) {
           case "READY": {
-            const readyData = (d ?? {}) as { session_id?: string; user?: { username?: string } };
+            const readyData = (d ?? {}) as { session_id?: string };
             this.sessionId = readyData.session_id ?? null;
             this.reconnectAttempts = 0;
-            this.log(
-              "info",
-              `QQ Bot READY — session=${this.sessionId} user=${readyData.user?.username ?? "?"}`,
-            );
+            this.log("info", "QQ Bot READY");
             break;
           }
           case "C2C_MESSAGE_CREATE":
@@ -349,7 +339,7 @@ export class QQBot {
             void this.handleGroupAtMessage(d as DispatchEvent);
             break;
           default:
-            this.log("debug", `QQ Bot dispatch ignored: t=${t}`);
+            this.log("debug", "QQ Bot unsupported dispatch ignored");
         }
         break;
       }
@@ -359,7 +349,7 @@ export class QQBot {
         break;
 
       default:
-        this.log("debug", `QQ Bot frame ignored: op=${op}`);
+        this.log("debug", "QQ Bot unsupported frame ignored");
     }
   }
 
@@ -375,10 +365,7 @@ export class QQBot {
 
     const chatId = `c2c:${senderOpenid}`;
     this.pending.set(event.id, { msgId: event.id, target: senderOpenid, kind: "c2c" });
-    this.log(
-      "debug",
-      `c2c chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
-    );
+    this.log("debug", `QQ Bot inbound c2c has_attachments=${Boolean(event.attachments?.length)}`);
     await this.dispatchPrompt({
       channelInstanceId: this.channelInstanceId,
       actorId: this.actorId,
@@ -398,10 +385,7 @@ export class QQBot {
 
     const chatId = `group:${groupOpenid}`;
     this.pending.set(event.id, { msgId: event.id, target: groupOpenid, kind: "group" });
-    this.log(
-      "debug",
-      `group chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
-    );
+    this.log("debug", `QQ Bot inbound group has_attachments=${Boolean(event.attachments?.length)}`);
     await this.dispatchPrompt({
       channelInstanceId: this.channelInstanceId,
       actorId: this.actorId,
@@ -421,10 +405,7 @@ export class QQBot {
 
     const chatId = `channel:${channelId}`;
     this.pending.set(event.id, { msgId: event.id, target: channelId, kind: "channel" });
-    this.log(
-      "debug",
-      `channel chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
-    );
+    this.log("debug", `QQ Bot inbound channel has_attachments=${Boolean(event.attachments?.length)}`);
     await this.dispatchPrompt({
       channelInstanceId: this.channelInstanceId,
       actorId: this.actorId,
@@ -444,10 +425,7 @@ export class QQBot {
 
     const chatId = `dm:${guildId}`;
     this.pending.set(event.id, { msgId: event.id, target: guildId, kind: "dm" });
-    this.log(
-      "debug",
-      `dm chat=${chatId} text=${text.slice(0, 80)} attachments=${event.attachments?.length ?? 0}`,
-    );
+    this.log("debug", `QQ Bot inbound dm has_attachments=${Boolean(event.attachments?.length)}`);
     await this.dispatchPrompt({
       channelInstanceId: this.channelInstanceId,
       actorId: this.actorId,
@@ -488,8 +466,7 @@ export class QQBot {
         attachment,
       ).catch(
         (err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          this.log("warn", `failed to download attachment ${attachment.filename ?? index}: ${msg}`);
+          this.log("warn", `attachment download failed category=${safeErrorCategory(err)}`);
           return null;
         },
       );
@@ -534,11 +511,11 @@ export class QQBot {
         await this.streamHandler?.onTurnEnd(target);
         return;
       }
-      this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
+      this.log("info", "prompt completed");
       await this.streamHandler?.onTurnEnd(target);
     } catch (error: unknown) {
       const errMsg = extractErrorMessage(error);
-      this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
+      this.log("error", `prompt failed category=${safeErrorCategory(error)}`);
       await this.streamHandler?.onTurnError(target, errMsg);
     } finally {
       if (target.replyTo) this.pending.delete(target.replyTo);
@@ -580,16 +557,13 @@ export class QQBot {
 
     try {
       await fs.access(localPath);
-      this.log("debug", `qqbot attachment cache hit: ${localPath}`);
+      this.log("debug", "QQ Bot attachment cache hit");
       return { path: localPath, mimeType: contentType, fileName };
     } catch {
       // not cached
     }
 
-    this.log(
-      "debug",
-      `downloading qqbot attachment chat=${chatId} name=${displayName}`,
-    );
+    this.log("debug", "QQ Bot attachment download started");
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} fetching attachment`);
@@ -597,10 +571,7 @@ export class QQBot {
     const buf = await readBoundedResponse(res);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(localPath, buf);
-    this.log(
-      "debug",
-      `cached qqbot attachment ${buf.length} bytes → ${localPath}`,
-    );
+    this.log("debug", `QQ Bot attachment cached bytes=${buf.length}`);
 
     return { path: localPath, mimeType: contentType, fileName };
   }
