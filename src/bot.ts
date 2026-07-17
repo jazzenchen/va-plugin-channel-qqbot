@@ -40,6 +40,7 @@ import {
 } from "@vibearound/plugin-channel-sdk";
 import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
+import { readBoundedResponse } from "./bounded-response.js";
 
 interface DownloadedAttachment {
   readonly path: string;
@@ -125,6 +126,7 @@ export class QQBot {
     return this.ws?.readyState === WebSocket.OPEN;
   }
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private awaitingHeartbeatAck = false;
   private lastSeq: number | null = null;
   private sessionId: string | null = null;
   private reconnectAttempts = 0;
@@ -170,9 +172,8 @@ export class QQBot {
     this.streamHandler = handler;
   }
 
-  /** Get a fresh access token (cached internally by the API helper). */
+  /** Get a fresh access token. The API helper owns expiry-aware caching. */
   private async ensureToken(): Promise<string> {
-    if (this.accessToken) return this.accessToken;
     this.accessToken = await getAccessToken(this.appId, this.clientSecret);
     return this.accessToken;
   }
@@ -226,7 +227,7 @@ export class QQBot {
     try {
       const token = await this.ensureToken();
       const gatewayUrl = await getGatewayUrl(token);
-      this.log("info", `QQ Bot connecting to ${gatewayUrl}`);
+      this.log("info", "QQ Bot connecting to gateway");
 
       const ws = new WebSocket(gatewayUrl);
       this.ws = ws;
@@ -249,6 +250,7 @@ export class QQBot {
           clearInterval(this.heartbeatTimer);
           this.heartbeatTimer = null;
         }
+        this.awaitingHeartbeatAck = false;
         if (!this.stopped) {
           this.scheduleReconnect();
         }
@@ -306,9 +308,16 @@ export class QQBot {
 
         // Start heartbeat
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.awaitingHeartbeatAck = false;
         this.heartbeatTimer = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
+            if (this.awaitingHeartbeatAck) {
+              this.log("warn", "QQ Bot heartbeat ACK timed out; reconnecting");
+              this.ws.terminate();
+              return;
+            }
             this.ws.send(JSON.stringify({ op: 1, d: this.lastSeq }));
+            this.awaitingHeartbeatAck = true;
           }
         }, interval);
         break;
@@ -346,6 +355,7 @@ export class QQBot {
       }
 
       case 11: // Heartbeat ACK
+        this.awaitingHeartbeatAck = false;
         break;
 
       default:
@@ -469,12 +479,17 @@ export class QQBot {
     }
 
     const downloaded: DownloadedAttachment[] = [];
-    for (const attachment of attachments ?? []) {
+    for (const [index, attachment] of (attachments ?? []).entries()) {
       if (!attachment.url) continue;
-      const local = await this.downloadAttachment(chatId, attachment).catch(
+      const local = await this.downloadAttachment(
+        chatId,
+        inboundContext.platformMessageId ?? "unknown",
+        index,
+        attachment,
+      ).catch(
         (err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          this.log("warn", `failed to download attachment ${attachment.url}: ${msg}`);
+          this.log("warn", `failed to download attachment ${attachment.filename ?? index}: ${msg}`);
           return null;
         },
       );
@@ -532,11 +547,13 @@ export class QQBot {
 
   /**
    * Download a QQ attachment into the plugin cache. Files are keyed by
-   * chatId + the last segment of the URL path so repeated references
-   * to the same file don't re-download.
+   * message id and attachment index, so same-name files in later messages
+   * cannot reuse stale bytes.
    */
   private async downloadAttachment(
     chatId: string,
+    messageId: string,
+    index: number,
     attachment: DispatchAttachment,
   ): Promise<DownloadedAttachment> {
     const url = attachment.url!;
@@ -556,11 +573,9 @@ export class QQBot {
     })();
     const baseFromUrl = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
     const supplied = (attachment.filename ?? "").replace(/[^a-zA-Z0-9._-]/g, "_");
-    const baseName = supplied || baseFromUrl || `${Date.now()}`;
-    const extHint = path.extname(baseName) || extFromMime(contentType);
-    const fileName = baseName.includes(".")
-      ? baseName
-      : `${baseName}${extHint}`;
+    const displayName = supplied || baseFromUrl || "attachment";
+    const safeMessageId = messageId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const fileName = buildAttachmentCacheFileName(safeMessageId, index, displayName, contentType);
     const localPath = path.join(dir, fileName);
 
     try {
@@ -573,13 +588,13 @@ export class QQBot {
 
     this.log(
       "debug",
-      `downloading qqbot attachment chat=${chatId} url=${url}`,
+      `downloading qqbot attachment chat=${chatId} name=${displayName}`,
     );
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} fetching attachment`);
     }
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = await readBoundedResponse(res);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(localPath, buf);
     this.log(
@@ -589,6 +604,17 @@ export class QQBot {
 
     return { path: localPath, mimeType: contentType, fileName };
   }
+}
+
+export function buildAttachmentCacheFileName(
+  messageId: string,
+  index: number,
+  displayName: string,
+  contentType: string,
+): string {
+  const baseName = `${messageId}-${index}-${displayName}`;
+  const extHint = path.extname(displayName) || extFromMime(contentType);
+  return path.extname(baseName) ? baseName : `${baseName}${extHint}`;
 }
 
 function extFromMime(mime: string): string {
