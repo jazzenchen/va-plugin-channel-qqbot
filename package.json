@@ -1,6 +1,6 @@
 {
   "name": "@vibearound/plugin-channel-qqbot",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "private": true,
   "type": "module",
   "description": "VibeAround QQ Bot (v2) channel plugin (stdio JSON-RPC)",
