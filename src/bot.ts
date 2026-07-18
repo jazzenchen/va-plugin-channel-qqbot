@@ -19,8 +19,14 @@
  *   7. Handle dispatch events (op=0): C2C_MESSAGE_CREATE, GROUP_AT_MESSAGE_CREATE, etc.
  */
 
+import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { pathToFileURL } from "node:url";
 import {
   getAccessToken,
   getGatewayUrl,
@@ -40,13 +46,12 @@ import {
 } from "@vibearound/plugin-channel-sdk";
 import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
-import { readBoundedResponse } from "./bounded-response.js";
 import { safeErrorCategory, SILENT_UPSTREAM_LOGGER } from "./log-policy.js";
 
 interface DownloadedAttachment {
   readonly path: string;
   readonly mimeType: string;
-  readonly fileName: string;
+  readonly displayName: string;
 }
 
 export interface QQBotConfig {
@@ -457,20 +462,20 @@ export class QQBot {
     }
 
     const downloaded: DownloadedAttachment[] = [];
-    for (const [index, attachment] of (attachments ?? []).entries()) {
-      if (!attachment.url) continue;
-      const local = await this.downloadAttachment(
-        chatId,
-        inboundContext.platformMessageId ?? "unknown",
-        index,
-        attachment,
-      ).catch(
-        (err: unknown) => {
-          this.log("warn", `attachment download failed category=${safeErrorCategory(err)}`);
-          return null;
-        },
-      );
-      if (local) downloaded.push(local);
+    const messageId = inboundContext.platformMessageId?.trim();
+    if (!messageId && (attachments ?? []).some((attachment) => attachment.url)) {
+      this.log("warn", "attachments dropped because the inbound message id is missing");
+    } else if (messageId) {
+      for (const [index, attachment] of (attachments ?? []).entries()) {
+        if (!attachment.url) continue;
+        const local = await this.downloadAttachment(chatId, messageId, index, attachment).catch(
+          (err: unknown) => {
+            this.log("warn", `attachment download failed category=${safeErrorCategory(err)}`);
+            return null;
+          },
+        );
+        if (local) downloaded.push(local);
+      }
     }
 
     if (!text && downloaded.length > 0) {
@@ -483,8 +488,8 @@ export class QQBot {
     for (const file of downloaded) {
       contentBlocks.push({
         type: "resource_link",
-        uri: `file://${file.path}`,
-        name: file.fileName,
+        uri: pathToFileURL(file.path).href,
+        name: file.displayName,
         mimeType: file.mimeType,
       });
     }
@@ -523,9 +528,8 @@ export class QQBot {
   }
 
   /**
-   * Download a QQ attachment into the plugin cache. Files are keyed by
-   * message id and attachment index, so same-name files in later messages
-   * cannot reuse stale bytes.
+   * Download a QQ attachment into the plugin cache. Entries are scoped by
+   * plugin instance, chat, message, and attachment index.
    */
   private async downloadAttachment(
     chatId: string,
@@ -536,11 +540,15 @@ export class QQBot {
     const url = attachment.url!;
     const contentType = attachment.content_type ?? "application/octet-stream";
 
-    const safeChannel = chatId.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const dir = path.join(this.cacheDir, "qqbot", safeChannel);
+    const dir = path.join(
+      this.cacheDir,
+      "qqbot",
+      fileSystemKey(this.channelInstanceId),
+      fileSystemKey(chatId),
+    );
 
-    // Build a stable filename: prefer the supplied filename, else derive
-    // from the URL path. Strip query strings which contain signatures.
+    // Preserve the platform filename for display, but use a sanitized cache
+    // key on disk. Signed URL query strings are excluded.
     const urlPath = (() => {
       try {
         return new URL(url).pathname;
@@ -548,17 +556,16 @@ export class QQBot {
         return url;
       }
     })();
-    const baseFromUrl = path.basename(urlPath).replace(/[^a-zA-Z0-9._-]/g, "_");
-    const supplied = (attachment.filename ?? "").replace(/[^a-zA-Z0-9._-]/g, "_");
+    const baseFromUrl = path.posix.basename(urlPath);
+    const supplied = path.posix.basename((attachment.filename ?? "").replaceAll("\\", "/")).trim();
     const displayName = supplied || baseFromUrl || "attachment";
-    const safeMessageId = messageId.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const fileName = buildAttachmentCacheFileName(safeMessageId, index, displayName, contentType);
+    const fileName = buildAttachmentStorageFileName(messageId, index);
     const localPath = path.join(dir, fileName);
 
     try {
       await fs.access(localPath);
       this.log("debug", "QQ Bot attachment cache hit");
-      return { path: localPath, mimeType: contentType, fileName };
+      return { path: localPath, mimeType: contentType, displayName };
     } catch {
       // not cached
     }
@@ -568,35 +575,42 @@ export class QQBot {
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} fetching attachment`);
     }
-    const buf = await readBoundedResponse(res);
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(localPath, buf);
-    this.log("debug", `QQ Bot attachment cached bytes=${buf.length}`);
+    const temporaryPath = path.join(dir, `.${randomUUID()}.tmp`);
+    try {
+      if (res.body) {
+        await pipeline(
+          Readable.fromWeb(res.body as NodeReadableStream),
+          createWriteStream(temporaryPath),
+        );
+      } else {
+        await fs.writeFile(temporaryPath, new Uint8Array());
+      }
+      try {
+        await fs.rename(temporaryPath, localPath);
+      } catch (error) {
+        try {
+          await fs.access(localPath);
+        } catch {
+          throw error;
+        }
+      }
+    } finally {
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+    this.log("debug", "QQ Bot attachment cached");
 
-    return { path: localPath, mimeType: contentType, fileName };
+    return { path: localPath, mimeType: contentType, displayName };
   }
 }
 
-export function buildAttachmentCacheFileName(
+function buildAttachmentStorageFileName(
   messageId: string,
   index: number,
-  displayName: string,
-  contentType: string,
 ): string {
-  const baseName = `${messageId}-${index}-${displayName}`;
-  const extHint = path.extname(displayName) || extFromMime(contentType);
-  return path.extname(baseName) ? baseName : `${baseName}${extHint}`;
+  return `${fileSystemKey(messageId)}-${index}`;
 }
 
-function extFromMime(mime: string): string {
-  const lower = mime.toLowerCase();
-  if (lower.includes("png")) return ".png";
-  if (lower.includes("jpeg") || lower.includes("jpg")) return ".jpg";
-  if (lower.includes("gif")) return ".gif";
-  if (lower.includes("webp")) return ".webp";
-  if (lower.includes("silk")) return ".silk";
-  if (lower.includes("wav")) return ".wav";
-  if (lower.includes("mp3")) return ".mp3";
-  if (lower.includes("mp4")) return ".mp4";
-  return "";
+function fileSystemKey(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
