@@ -1,6 +1,6 @@
 {
   "name": "@vibearound/plugin-channel-qqbot",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "private": true,
   "type": "module",
   "description": "VibeAround QQ Bot (v2) channel plugin (stdio JSON-RPC)",
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@tencent-connect/openclaw-qqbot": "^1.7.2",
-    "@vibearound/plugin-channel-sdk": "^0.6.3",
+    "@vibearound/plugin-channel-sdk": "^0.6.6",
     "ws": "^8.21.0",
     "zod": "^4.3.6"
   },

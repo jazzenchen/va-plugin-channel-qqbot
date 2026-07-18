@@ -18,7 +18,7 @@ import { AgentStreamHandler } from "./agent-stream.js";
 
 runChannelPlugin({
   name: "vibearound-qqbot",
-  version: "0.6.5",
+  version: "0.6.6",
   requiredConfig: ["app_id", "secret"],
   createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new QQBot(
