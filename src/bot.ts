@@ -462,8 +462,8 @@ export class QQBot {
     }
 
     const downloaded: DownloadedAttachment[] = [];
-    const messageId = inboundContext.platformMessageId?.trim();
-    if (!messageId && (attachments ?? []).some((attachment) => attachment.url)) {
+    const messageId = inboundContext.platformMessageId;
+    if (!messageId?.trim() && (attachments ?? []).some((attachment) => attachment.url)) {
       this.log("warn", "attachments dropped because the inbound message id is missing");
     } else if (messageId) {
       for (const [index, attachment] of (attachments ?? []).entries()) {
@@ -537,7 +537,8 @@ export class QQBot {
     index: number,
     attachment: DispatchAttachment,
   ): Promise<DownloadedAttachment> {
-    const url = attachment.url!;
+    const rawUrl = attachment.url!;
+    const url = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
     const contentType = attachment.content_type ?? "application/octet-stream";
 
     const dir = path.join(

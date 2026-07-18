@@ -99,6 +99,65 @@ test("same-name attachments use message and instance scoped cache entries", asyn
     filename: "../../报告.pdf",
   }]);
   assert.notEqual(secondInstancePath, localPaths[0]);
+  assert.notEqual(secondInstancePath.toLowerCase(), localPaths[0].toLowerCase());
+});
+
+test("same-message attachment indexes remain distinct", async (t) => {
+  const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "qqbot-indexes-"));
+  t.after(() => fs.rm(cacheDir, { recursive: true, force: true }));
+  const bot = new QQBot(
+    { app_id: "app", secret: "secret" },
+    {
+      async prompt({ prompt }) {
+        const links = prompt.filter((block) => block.type === "resource_link");
+        assert.equal(links.length, 2);
+        const paths = links.map((link) => fileURLToPath(link.uri));
+        assert.notEqual(paths[0], paths[1]);
+        assert.deepEqual(await Promise.all(paths.map((file) => fs.readFile(file, "utf8"))), ["a", "b"]);
+        return { stopReason: "end_turn" };
+      },
+    },
+    () => {},
+    cacheDir,
+    "instance",
+    "actor",
+  );
+
+  await bot.dispatchPrompt(context("one-message"), "", [
+    { url: "data:text/plain,a", filename: "same.txt" },
+    { url: "data:text/plain,b", filename: "same.txt" },
+  ]);
+});
+
+test("normalizes QQ protocol-relative attachment URLs", async (t) => {
+  const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "qqbot-relative-url-"));
+  t.after(() => fs.rm(cacheDir, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let requestedUrl;
+  globalThis.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response("normalized");
+  };
+  const bot = new QQBot(
+    { app_id: "app", secret: "secret" },
+    {
+      async prompt({ prompt }) {
+        assert.equal(await fs.readFile(fileURLToPath(attachmentLink(prompt).uri), "utf8"), "normalized");
+        return { stopReason: "end_turn" };
+      },
+    },
+    () => {},
+    cacheDir,
+    "instance",
+    "actor",
+  );
+
+  await bot.dispatchPrompt(context("relative-url"), "", [{
+    url: "//cdn.qq.example/file.bin",
+    filename: "file.bin",
+  }]);
+  assert.equal(requestedUrl, "https://cdn.qq.example/file.bin");
 });
 
 test("concurrent deliveries of one message reuse only a completed cache entry", async (t) => {
