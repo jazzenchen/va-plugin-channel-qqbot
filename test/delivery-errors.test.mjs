@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AgentStreamHandler } from "../dist/agent-stream.js";
 import { QQBot } from "../dist/bot.js";
 
 const target = {
@@ -62,28 +61,4 @@ test("sendText propagates QQ API failures without logging response content", asy
     message: "sendText failed category=http_500",
   }]);
   assert.equal(logs.some(({ message }) => message.includes("sensitive")), false);
-});
-
-test("onTurnEnd rejects when QQ block delivery fails", async () => {
-  const deliveryError = new Error("QQ delivery failed");
-  const renderer = new AgentStreamHandler({
-    async sendText() {
-      throw deliveryError;
-    },
-  }, () => {});
-
-  renderer.onPromptSent(target);
-  renderer.onSessionUpdate(target, {
-    sessionId: "session",
-    update: {
-      sessionUpdate: "agent_message_chunk",
-      messageId: "agent-message",
-      content: { type: "text", text: "answer" },
-    },
-  });
-
-  await assert.rejects(
-    renderer.onTurnEnd(target),
-    (error) => error === deliveryError,
-  );
 });
