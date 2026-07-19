@@ -181,8 +181,8 @@ export class QQBot {
   async sendText(target: ChannelTarget, content: string): Promise<void> {
     const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", "reply dropped because its pending context expired");
-      return;
+      this.log("warn", "sendText failed category=missing_context");
+      throw new Error("QQ reply context is unavailable");
     }
     try {
       const token = await this.ensureToken();
@@ -202,6 +202,7 @@ export class QQBot {
       }
     } catch (error: unknown) {
       this.log("error", `sendText failed category=${safeErrorCategory(error)}`);
+      throw error;
     }
   }
 
@@ -332,16 +333,24 @@ export class QQBot {
             break;
           }
           case "C2C_MESSAGE_CREATE":
-            void this.handleC2CMessage(d as DispatchEvent);
+            void this.handleC2CMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "AT_MESSAGE_CREATE":
-            void this.handleAtMessage(d as DispatchEvent);
+            void this.handleAtMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "DIRECT_MESSAGE_CREATE":
-            void this.handleDmMessage(d as DispatchEvent);
+            void this.handleDmMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "GROUP_AT_MESSAGE_CREATE":
-            void this.handleGroupAtMessage(d as DispatchEvent);
+            void this.handleGroupAtMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           default:
             this.log("debug", "QQ Bot unsupported dispatch ignored");
