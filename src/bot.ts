@@ -181,28 +181,22 @@ export class QQBot {
   async sendText(target: ChannelTarget, content: string): Promise<void> {
     const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", "sendText failed category=missing_context");
       throw new Error("QQ reply context is unavailable");
     }
-    try {
-      const token = await this.ensureToken();
-      switch (ctx.kind) {
-        case "c2c":
-          await sendC2CMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "group":
-          await sendGroupMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "channel":
-          await sendChannelMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "dm":
-          await sendDmMessage(token, ctx.target, content, ctx.msgId);
-          break;
-      }
-    } catch (error: unknown) {
-      this.log("error", `sendText failed category=${safeErrorCategory(error)}`);
-      throw error;
+    const token = await this.ensureToken();
+    switch (ctx.kind) {
+      case "c2c":
+        await sendC2CMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "group":
+        await sendGroupMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "channel":
+        await sendChannelMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "dm":
+        await sendDmMessage(token, ctx.target, content, ctx.msgId);
+        break;
     }
   }
 

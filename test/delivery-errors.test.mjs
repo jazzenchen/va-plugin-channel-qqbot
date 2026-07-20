@@ -29,13 +29,10 @@ test("sendText rejects when the pending reply context is missing", async () => {
     bot.sendText(target, "reply"),
     /QQ reply context is unavailable/,
   );
-  assert.deepEqual(logs, [{
-    level: "warn",
-    message: "sendText failed category=missing_context",
-  }]);
+  assert.deepEqual(logs, []);
 });
 
-test("sendText propagates QQ API failures without logging response content", async (t) => {
+test("sendText propagates QQ API failures without logging locally", async (t) => {
   const logs = [];
   const bot = createBot((level, message) => logs.push({ level, message }));
   bot.pending.set(target.replyTo, {
@@ -56,9 +53,5 @@ test("sendText propagates QQ API failures without logging response content", asy
   );
 
   await assert.rejects(bot.sendText(target, "reply"));
-  assert.deepEqual(logs, [{
-    level: "error",
-    message: "sendText failed category=http_500",
-  }]);
-  assert.equal(logs.some(({ message }) => message.includes("sensitive")), false);
+  assert.deepEqual(logs, []);
 });
