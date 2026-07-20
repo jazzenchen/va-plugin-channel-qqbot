@@ -181,27 +181,22 @@ export class QQBot {
   async sendText(target: ChannelTarget, content: string): Promise<void> {
     const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
     if (!ctx) {
-      this.log("warn", "reply dropped because its pending context expired");
-      return;
+      throw new Error("QQ reply context is unavailable");
     }
-    try {
-      const token = await this.ensureToken();
-      switch (ctx.kind) {
-        case "c2c":
-          await sendC2CMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "group":
-          await sendGroupMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "channel":
-          await sendChannelMessage(token, ctx.target, content, ctx.msgId);
-          break;
-        case "dm":
-          await sendDmMessage(token, ctx.target, content, ctx.msgId);
-          break;
-      }
-    } catch (error: unknown) {
-      this.log("error", `sendText failed category=${safeErrorCategory(error)}`);
+    const token = await this.ensureToken();
+    switch (ctx.kind) {
+      case "c2c":
+        await sendC2CMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "group":
+        await sendGroupMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "channel":
+        await sendChannelMessage(token, ctx.target, content, ctx.msgId);
+        break;
+      case "dm":
+        await sendDmMessage(token, ctx.target, content, ctx.msgId);
+        break;
     }
   }
 
@@ -332,16 +327,24 @@ export class QQBot {
             break;
           }
           case "C2C_MESSAGE_CREATE":
-            void this.handleC2CMessage(d as DispatchEvent);
+            void this.handleC2CMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "AT_MESSAGE_CREATE":
-            void this.handleAtMessage(d as DispatchEvent);
+            void this.handleAtMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "DIRECT_MESSAGE_CREATE":
-            void this.handleDmMessage(d as DispatchEvent);
+            void this.handleDmMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           case "GROUP_AT_MESSAGE_CREATE":
-            void this.handleGroupAtMessage(d as DispatchEvent);
+            void this.handleGroupAtMessage(d as DispatchEvent).catch((error: unknown) => {
+              this.log("error", `inbound message handling failed category=${safeErrorCategory(error)}`);
+            });
             break;
           default:
             this.log("debug", "QQ Bot unsupported dispatch ignored");

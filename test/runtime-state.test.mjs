@@ -4,7 +4,8 @@ import test from "node:test";
 import WebSocket from "ws";
 import { QQBot } from "../dist/bot.js";
 
-test("missing heartbeat ACK terminates the stale gateway", async () => {
+test("missing heartbeat ACK terminates the stale gateway", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   let heartbeats = 0;
   let terminated = false;
   const bot = new QQBot(
@@ -23,7 +24,8 @@ test("missing heartbeat ACK terminates the stale gateway", async () => {
   };
 
   bot.handleFrame({ op: 10, d: { heartbeat_interval: 5 } });
-  await new Promise((resolve) => setTimeout(resolve, 15));
+  t.mock.timers.tick(5);
+  t.mock.timers.tick(5);
   await bot.stop();
 
   assert.equal(heartbeats, 1);
