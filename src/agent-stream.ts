@@ -6,6 +6,7 @@ import {
   BlockRenderer,
   type BlockKind,
   type ChannelTarget,
+  type OutboundFile,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { QQBot } from "./bot.js";
@@ -28,6 +29,13 @@ export class AgentStreamHandler extends BlockRenderer<string> {
 
   protected async sendText(target: ChannelTarget, text: string): Promise<void> {
     await this.qqBot.sendText(target, text);
+  }
+
+  protected async sendFile(
+    target: ChannelTarget,
+    file: OutboundFile,
+  ): Promise<void> {
+    await this.qqBot.sendFile(target, file);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {

@@ -31,7 +31,9 @@ import {
   getAccessToken,
   getGatewayUrl,
   sendC2CMessage,
+  sendC2CFileMessage,
   sendGroupMessage,
+  sendGroupFileMessage,
   sendChannelMessage,
   sendDmMessage,
   setApiLogger,
@@ -44,7 +46,7 @@ import {
   isChannelStopCommand,
   sendChannelPrompt,
 } from "@vibearound/plugin-channel-sdk";
-import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock, OutboundFile } from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 import { safeErrorCategory, SILENT_UPSTREAM_LOGGER } from "./log-policy.js";
 
@@ -198,6 +200,41 @@ export class QQBot {
         await sendDmMessage(token, ctx.target, content, ctx.msgId);
         break;
     }
+  }
+
+  async sendFile(target: ChannelTarget, file: OutboundFile): Promise<void> {
+    const ctx = target.replyTo ? this.pending.get(target.replyTo) : undefined;
+    if (!ctx) {
+      throw new Error("QQ reply context is unavailable");
+    }
+    if (ctx.kind !== "c2c" && ctx.kind !== "group") {
+      throw new Error("QQ file upload is only supported in C2C and group chats");
+    }
+
+    const [token, contents] = await Promise.all([
+      this.ensureToken(),
+      fs.readFile(file.path, "base64"),
+    ]);
+    if (ctx.kind === "c2c") {
+      await sendC2CFileMessage(
+        token,
+        ctx.target,
+        contents,
+        undefined,
+        ctx.msgId,
+        file.name,
+        file.path,
+      );
+      return;
+    }
+    await sendGroupFileMessage(
+      token,
+      ctx.target,
+      contents,
+      undefined,
+      ctx.msgId,
+      file.name,
+    );
   }
 
   async start(): Promise<void> {

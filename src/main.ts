@@ -11,14 +11,20 @@
 // MUST be the first import — guards stdout from qq-guild-bot SDK loglevel output
 import "./stdout-guard.js";
 
+import { createRequire } from "node:module";
+
 import { runChannelPlugin } from "@vibearound/plugin-channel-sdk";
 
 import { QQBot } from "./bot.js";
 import { AgentStreamHandler } from "./agent-stream.js";
 
+const packageVersion = (
+  createRequire(import.meta.url)("../package.json") as { version: string }
+).version;
+
 runChannelPlugin({
   name: "vibearound-qqbot",
-  version: "0.6.6",
+  version: packageVersion,
   requiredConfig: ["app_id", "secret"],
   createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new QQBot(
